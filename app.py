@@ -85,46 +85,79 @@ TARIFAS_DOCUMENTO = {
 
 # --- LÓGICA DE PROCESAMIENTO (ADAPTADA PARA RECIBIR OBJETOS) ---
 
-def procesar_todo(file_pedidos, file_tarifas):
+def procesar_todo(file_pedidos, file_t):
     wb_pedidos = load_workbook(file_pedidos)
-    wb_tarifas = load_workbook(file_tarifas, data_only=True)
+    wb_tarifas = load_workbook(file_t, data_only=True)
 
-    # 1. MERCANCIA
+    # --- 1. PROCESAMIENTO DE MERCANCÍA ---
     if HOJA_PEDIDOS in wb_pedidos.sheetnames:
         ws_pedidos = wb_pedidos[HOJA_PEDIDOS]
         ws_tarifas = wb_tarifas[HOJA_TARIFAS]
+        
         origenes, destinos = construir_indices(ws_tarifas)
         headers = {str(ws_pedidos.cell(1, c).value).strip().upper(): c for c in range(1, ws_pedidos.max_column + 1) if ws_pedidos.cell(1, c).value}
         
         base_col = ws_pedidos.max_column
-        for i, tit in enumerate(["CIUDAD_ORIGEN", "CIUDAD_DESTINO", "VALOR_KILO", "PREFAC_FLETE", "OBS_MATCH", "COMPARA_TOTAL"], 1):
-            ws_pedidos.cell(1, base_col + i).value = tit
-            ws_pedidos.cell(1, base_col + i).font = Font(bold=True)
+        # Agregamos encabezados de resultados
+        nuevos_titulos = ["CIUDAD_ORIGEN", "CIUDAD_DESTINO", "VALOR_KILO", "PREFAC_FLETE", "OBS_MATCH", "COMPARA_TOTAL"]
+        for i, tit in enumerate(nuevos_titulos, 1):
+            cell = ws_pedidos.cell(1, base_col + i)
+            cell.value = tit
+            cell.font = Font(bold=True)
 
         for row in range(2, ws_pedidos.max_row + 1):
-            # Aquí va tu lógica de cálculo de flete base, descuento, manejo y seguro...
-            # (Simplificado para el ejemplo pero manteniendo tu estructura)
-            orig = limpiar_ciudad(ws_pedidos.cell(row, headers["ORIGEN"]).value)
-            dest = limpiar_ciudad(ws_pedidos.cell(row, headers["DESTINO"]).value)
-            peso = _as_int(ws_pedidos.cell(row, headers["PESO FACTURADO"]).value)
-            unid = _as_int(ws_pedidos.cell(row, headers.get("UNIDADES")).value) if "UNIDADES" in headers else 0
-            decl = _as_int(ws_pedidos.cell(row, headers.get("DECLARADO")).value) if "DECLARADO" in headers else 0
-            total_ext = _as_int(ws_pedidos.cell(row, headers.get("TOTAL")).value) if "TOTAL" in headers else None
+            # Extracción de datos con limpieza
+            orig_raw = ws_pedidos.cell(row, headers.get("ORIGEN", 0)).value
+            dest_raw = ws_pedidos.cell(row, headers.get("DESTINO", 0)).value
+            
+            orig = limpiar_ciudad(orig_raw)
+            dest = limpiar_ciudad(dest_raw)
+            
+            peso = _as_int(ws_pedidos.cell(row, headers.get("PESO FACTURADO", 0)).value)
+            unid = _as_int(ws_pedidos.cell(row, headers.get("UNIDADES", 0)).value)
+            decl = _as_int(ws_pedidos.cell(row, headers.get("DECLARADO", 0)).value)
+            total_ext = _as_int(ws_pedidos.cell(row, headers.get("TOTAL", 0)).value)
 
             col_o, fila_d = origenes.get(orig), destinos.get(dest)
+            
             if col_o and fila_d:
                 vk = _as_int(ws_tarifas.cell(fila_d, col_o).value)
+                
                 if vk > 0:
                     flete_base = peso * vk
-                    total_calc = (flete_base - (flete_base // 4)) + (unid * COSTO_MANEJO_POR_UNIDAD) + (decl // 200 if decl > UMBRAL_DECLARADO_SEGURO else 0)
-                    ws_pedidos.cell(row, base_col+3).value = vk
-                    ws_pedidos.cell(row, base_col+4).value = total_calc
-                    ws_pedidos.cell(row, base_col+5).value = "OK"
+                    
+                    # --- LÓGICA DE DESCUENTO CONDICIONAL (25%) ---
+                    # No aplica descuento si el destino contiene "REEXPEDIDO"
+                    es_reexpedido = "REEXPEDIDO" in dest
+                    
+                    if es_reexpedido:
+                        flete_con_descuento = flete_base  # Tarifa plena
+                        obs_txt = "OK (REEXPEDIDO SIN DESC)"
+                    else:
+                        flete_con_descuento = flete_base * (1 - PORC_DESCUENTO)
+                        obs_txt = "OK"
+
+                    # Cálculo de componentes adicionales
+                    costo_manejo = unid * COSTO_MANEJO_POR_UNIDAD
+                    costo_seguro = int(decl * PORC_SEGURO) if decl > UMBRAL_DECLARADO_SEGURO else 0
+                    
+                    total_calc = int(flete_con_descuento + costo_manejo + costo_seguro)
+
+                    # Escribir resultados en las nuevas columnas
+                    ws_pedidos.cell(row, base_col + 1).value = orig
+                    ws_pedidos.cell(row, base_col + 2).value = dest
+                    ws_pedidos.cell(row, base_col + 3).value = vk
+                    ws_pedidos.cell(row, base_col + 4).value = total_calc
+                    ws_pedidos.cell(row, base_col + 5).value = obs_txt
+                    
+                    # Comparación con el total del archivo
                     if total_ext:
                         dif = abs(total_calc - total_ext)
-                        ws_pedidos.cell(row, base_col+6).value = "IGUAL" if dif == 0 else ("SIMILAR" if dif <= UMBRAL_SIMILAR else "DIFERENTE")
-                else: ws_pedidos.cell(row, base_col+5).value = "VALOR INVALIDO"
-            else: ws_pedidos.cell(row, base_col+5).value = "NO SE ENCONTRO TARIFA"
+                        ws_pedidos.cell(row, base_col + 6).value = "IGUAL" if dif == 0 else ("SIMILAR" if dif <= UMBRAL_SIMILAR else "DIFERENTE")
+                else:
+                    ws_pedidos.cell(row, base_col + 5).value = "VALOR KILO EN 0"
+            else:
+                ws_pedidos.cell(row, base_col + 5).value = "CIUDAD NO ENCONTRADA EN MATRIZ"
 
     # 2. PAQUETE
     if "PAQUETE" in wb_pedidos.sheetnames:
